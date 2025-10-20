@@ -164,24 +164,47 @@ def to_ino(py_file):
     headers = detect_headers(py_file)
     with open(py_file) as f:
         tree = ast.parse(f.read())
-    lines = [f'#include "{h}"' for h in headers] + ["\n"]
+
+    defines = []
+    lines = []
 
     for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+        if isinstance(node, ast.Assign):
+            # Only handle single-target constants for #define
+            if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and
+                isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float))):
+                defines.append(f"#define {node.targets[0].id} {node.value.value}")
+            else:
+                var = ", ".join(t.id for t in node.targets)
+                val = py_expr_to_cpp(node.value)
+                lines.append(f"{var} = {val};")
+
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
             var = node.targets[0].id
             cls = node.value.func.id
             args = ", ".join(py_expr_to_cpp(a) for a in node.value.args)
             lines.append(f"{cls} {var}({args});")
 
+    # Add function bodies
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
             lines.extend(py_stmt_to_cpp(node))
 
     out_file = os.path.splitext(py_file)[0]+".ino"
     with open(out_file, "w") as f:
+        # Headers first
+        for h in headers:
+            f.write(f'#include "{h}"\n')
+        f.write("\n")
+        # Defines
+        for d in defines:
+            f.write(d + "\n")
+        f.write("\n")
+        # Rest of code
         f.write("\n".join(lines))
-    print(f"✅ Transpiled {py_file} → {out_file} with headers {headers}")
 
+    print(f"✅ Transpiled {py_file} → {out_file} with headers {headers} and #defines")
+    
 # -------------------- CLI --------------------
 def main():
     parser = argparse.ArgumentParser()

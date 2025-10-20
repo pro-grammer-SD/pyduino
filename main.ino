@@ -1,12 +1,16 @@
 #include "CheapStepper.h"
 
-CheapStepper motor(8, 9, 10, 11);
+#define SPEED 15
+#define STEPS 512
+#define DELAY 1000
+
+motor = CheapStepper(8, 9, 10, 11);
 void setup() {
-    motor.setRpm(15);
+    motor.setRpm(SPEED);
 }
 void loop() {
-    motor.moveCW(512);
-    delay(1000);
-    motor.moveCCW(512);
-    delay(1000);
+    motor.moveCW(STEPS);
+    delay(DELAY);
+    motor.moveCCW(STEPS);
+    delay(DELAY);
 }
