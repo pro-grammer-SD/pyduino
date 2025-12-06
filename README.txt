@@ -1,42 +1,79 @@
 ========================================
-Arduino Python Transpiler
+
+# Arduino Python Transpiler
+
 ========================================
 
-This tool converts C++ Arduino headers into Python stubs,
-and Python sketches into Arduino .ino files.
+This tool converts C++ Arduino headers into Python stubs, and Python sketches into Arduino `.ino` files.
+It also auto-detects imported headers, supports `#define` constants from Python variables, and enables direct upload to Arduino boards via `arduino-cli`.
 
-It also auto-detects imported headers and supports
-#define constants from Python variables.
+---
 
-----------------------------------------
-Setup / Requirements
-----------------------------------------
+## Setup / Requirements
+
+---
+
 1. Python 3.11+ (tested)
-2. clang + libclang (Windows: libclang.dll)
+2. clang + libclang (Windows: `libclang.dll`)
 3. Install Python dependencies:
-   pip install clang
 
-----------------------------------------
-Usage
-----------------------------------------
-1. Convert Arduino header (.h) to Python stub:
-   python arduino_transpile.py convert-header path/to/MyLibrary.h
-   - This creates MyLibrary.py stub with classes and methods.
+   ```bash
+   pip install clang rich
+   ```
+4. Arduino CLI installed and configured: [https://arduino.github.io/arduino-cli/installation/](https://arduino.github.io/arduino-cli/installation/)
 
-2. Convert Python sketch (.py) to Arduino .ino:
-   python arduino_transpile.py to-ino path/to/sketch.py
-   - Automatically detects all headers from Python imports (except Arduino.py)
-   - Converts Python constants to #define
-   - Converts Python classes/objects to Arduino objects
-   - Generates proper setup() and loop() methods
+---
 
-----------------------------------------
-Python Sketch Example
-----------------------------------------
+## Usage
+
+---
+
+### 1. Convert Arduino header (.h) to Python stub
+
+```bash
+python arduino_transpile.py convert-header path/to/MyLibrary.h
+```
+
+* Creates `MyLibrary.py` stub with classes and methods.
+* Supports multiple constructors, choosing the one with arguments automatically.
+
+### 2. Convert Python sketch (.py) to Arduino `.ino`
+
+```bash
+python arduino_transpile.py to-ino path/to/sketch.py
+```
+
+* Auto-detects headers from Python imports (ignores `Arduino.py`).
+* Converts Python constants (int/float) to `#define`.
+* Converts Python classes/objects to Arduino objects.
+* Generates proper `setup()` and `loop()` methods.
+* Ignores unsupported Python statements like imports in the `.ino` file.
+
+### 3. Upload Python sketch to Arduino
+
+```bash
+python arduino_transpile.py upload path/to/sketch.py --port COM6
+```
+
+* Converts `.py` → `.ino`, creates sketch folder if needed.
+* Auto-detects Arduino Uno port if `--port` is omitted.
+* Optional flags:
+
+  * `--auto-loop`: Auto-generate `loop()` calling all functions.
+  * `--fqbn <board>`: Specify Arduino board FQBN.
+  * `--list-ports`: List all connected Arduino boards.
+
+---
+
+## Python Sketch Example
+
+---
+
+```python
 from CheapStepper import CheapStepper
 
 motor = CheapStepper(8, 9, 10, 11)
-RPM = 15  # will become #define RPM 15
+RPM = 15  # becomes #define RPM 15
 
 def setup():
     motor.setRpm(RPM)
@@ -46,10 +83,15 @@ def loop():
     delay(1000)
     motor.moveCCW(512)
     delay(1000)
+```
 
-----------------------------------------
-Generated .ino Example
-----------------------------------------
+---
+
+## Generated `.ino` Example
+
+---
+
+```cpp
 #include "CheapStepper.h"
 
 CheapStepper motor(8, 9, 10, 11);
@@ -65,17 +107,25 @@ void loop() {
     motor.moveCCW(512);
     delay(1000);
 }
+```
 
-----------------------------------------
-Notes
-----------------------------------------
-- Only Python constants (int/float) are converted to #define.
-- Multiple constructors are supported; the one with arguments is chosen automatically.
-- Other Python statements are transpiled into C++-style Arduino syntax.
-- If a header cannot be detected, manually add it as:
+---
+
+## Notes
+
+---
+
+* Only Python constants (`int`/`float`) are converted to `#define`.
+* Multiple constructors supported; the one with arguments is chosen automatically.
+* Other Python statements transpiled into C++-style Arduino syntax.
+* Unsupported Python imports/statements are ignored in `.ino`.
+* If a header cannot be auto-detected, manually include it:
+
+  ```cpp
   #include "MyLibrary.h"
-- Contributions are OPENLY supported! :D
+  ```
+* Contributions are welcome! :D
 
 ========================================
 End of Guide
-========================================
+============

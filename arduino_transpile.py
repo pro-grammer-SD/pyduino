@@ -1,5 +1,9 @@
-import argparse, os, ast, re
+import argparse, os, ast, re, subprocess, shutil, datetime
 from clang.cindex import Index, Config, CursorKind
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
 
 # -------------------- Helpers --------------------
 def cpp_type_to_py(cpp_type):
@@ -43,7 +47,7 @@ def generate_python_stub(classes, out_file):
             for method in cls['methods']:
                 method_names.setdefault(method['name'], []).append(method)
             for name, overloads in method_names.items():
-                if name == cls['name']:  # constructor (__init__)
+                if name == cls['name']:
                     chosen = next((m for m in overloads if m["args"]), overloads[0])
                     args = ", ".join(f"{n}: {t}" for n, t in chosen["args"])
                     f.write(f"    def __init__(self, {args}):\n        ...\n")
@@ -57,7 +61,7 @@ def generate_python_stub(classes, out_file):
             if not cls['methods']:
                 f.write("    pass\n")
             f.write("\n")
-    print(f"✅ Python stub written to {out_file}")
+    console.print(f"[green]✅ Python stub written to {out_file}[/green]")
 
 def convert_header(header_file):
     py_file = os.path.splitext(os.path.basename(header_file))[0] + ".py"
@@ -89,26 +93,30 @@ def py_expr_to_cpp(node):
         func = node.func
         args = ", ".join(py_expr_to_cpp(a) for a in node.args)
         if isinstance(func, ast.Attribute):
-            return f"{func.value.id}.{func.attr}({args})"
+            val = func.value.id if isinstance(func.value, ast.Name) else "obj"
+            return f"{val}.{func.attr}({args})"
         elif isinstance(func, ast.Name):
             return f"{func.id}({args})"
     elif isinstance(node, ast.Name):
         return node.id
     elif isinstance(node, ast.Constant):
         return repr(node.value)
-    return "/* unsupported */"
+    return "0"
 
-def py_stmt_to_cpp(node, indent=0):
+def py_stmt_to_cpp(node, indent=0, global_scope=True):
     ind = "    " * indent
     lines = []
     if isinstance(node, ast.Assign):
-        targets = ", ".join(t.id for t in node.targets)
-        val = py_expr_to_cpp(node.value)
-        # add #define for constant numbers
-        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float)):
-            lines.append(f"#define {targets} {val}")
+        # Detect class instantiation
+        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+            cls_name = node.value.func.id
+            args = ", ".join(py_expr_to_cpp(a) for a in node.value.args)
+            lines.append(f"{cls_name} {node.targets[0].id}({args});")
+        # Detect numeric constants
+        elif isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float)):
+            lines.append(f"#define {node.targets[0].id} {node.value.value}")
         else:
-            lines.append(f"{ind}{targets} = {val};")
+            lines.append(f"{ind}{node.targets[0].id} = {py_expr_to_cpp(node.value)};")
     elif isinstance(node, ast.AugAssign):
         lines.append(f"{ind}{node.target.id} {BIN_OPS[type(node.op)]}= {py_expr_to_cpp(node.value)};")
     elif isinstance(node, ast.Expr):
@@ -116,115 +124,179 @@ def py_stmt_to_cpp(node, indent=0):
     elif isinstance(node, ast.If):
         lines.append(f"{ind}if {py_expr_to_cpp(node.test)} {{")
         for n in node.body:
-            lines.extend(py_stmt_to_cpp(n, indent+1))
+            lines.extend(py_stmt_to_cpp(n, indent+1, False))
         if node.orelse:
             lines.append(f"{ind}}} else {{")
             for n in node.orelse:
-                lines.extend(py_stmt_to_cpp(n, indent+1))
+                lines.extend(py_stmt_to_cpp(n, indent+1, False))
         lines.append(f"{ind}}}")
     elif isinstance(node, ast.While):
         lines.append(f"{ind}while {py_expr_to_cpp(node.test)} {{")
         for n in node.body:
-            lines.extend(py_stmt_to_cpp(n, indent+1))
+            lines.extend(py_stmt_to_cpp(n, indent+1, False))
         lines.append(f"{ind}}}")
     elif isinstance(node, ast.For):
-        if isinstance(node.iter, ast.Call) and node.iter.func.id=="range":
+        if isinstance(node.iter, ast.Call) and getattr(node.iter.func, "id", "")=="range":
             args = node.iter.args
             start, end = ("0", py_expr_to_cpp(args[0])) if len(args)==1 else (py_expr_to_cpp(args[0]), py_expr_to_cpp(args[1]))
             var = node.target.id
             lines.append(f"{ind}for (int {var}={start}; {var}<{end}; {var}++) {{")
             for n in node.body:
-                lines.extend(py_stmt_to_cpp(n, indent+1))
+                lines.extend(py_stmt_to_cpp(n, indent+1, False))
             lines.append(f"{ind}}}")
     elif isinstance(node, ast.FunctionDef):
         args = ", ".join(f"auto {a.arg}" for a in node.args.args)
         lines.append(f"{ind}void {node.name}({args}) {{")
         for n in node.body:
-            lines.extend(py_stmt_to_cpp(n, indent+1))
+            lines.extend(py_stmt_to_cpp(n, indent+1, False))
         lines.append(f"{ind}}}")
-    elif isinstance(node, ast.Break):
-        lines.append(f"{ind}break;")
-    elif isinstance(node, ast.Continue):
-        lines.append(f"{ind}continue;")
-    else:
-        lines.append(f"{ind}/* unsupported: {type(node)} */")
+    elif isinstance(node, (ast.Break, ast.Continue)):
+        lines.append(f"{ind}{type(node).__name__.lower()};")
     return lines
 
 def detect_headers(py_file):
     headers = set()
     with open(py_file) as f:
-        content = f.read()
-    for line in content.splitlines():
-        m = re.match(r'from (\w+) import', line)
-        if m and m.group(1) != "Arduino":
-            headers.add(f"{m.group(1)}.h")
+        for line in f:
+            m = re.match(r'from (\w+) import', line)
+            if m and m.group(1) != "Arduino":
+                headers.add(f"{m.group(1)}.h")
     return list(headers)
 
-def to_ino(py_file):
+def to_ino(py_file, auto_loop=False):
     headers = detect_headers(py_file)
     with open(py_file) as f:
         tree = ast.parse(f.read())
 
-    defines = []
-    lines = []
+    func_defs = {}
+    other_stmts = []
 
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            # Only handle single-target constants for #define
-            if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and
-                isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float))):
-                defines.append(f"#define {node.targets[0].id} {node.value.value}")
-            else:
-                var = ", ".join(t.id for t in node.targets)
-                val = py_expr_to_cpp(node.value)
-                lines.append(f"{var} = {val};")
-
-        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
-            var = node.targets[0].id
-            cls = node.value.func.id
-            args = ", ".join(py_expr_to_cpp(a) for a in node.value.args)
-            lines.append(f"{cls} {var}({args});")
-
-    # Add function bodies
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            lines.extend(py_stmt_to_cpp(node))
+            func_defs[node.name] = py_stmt_to_cpp(node)
+        elif not isinstance(node, (ast.Import, ast.ImportFrom)):
+            other_stmts.extend(py_stmt_to_cpp(node))
 
-    out_file = os.path.splitext(py_file)[0]+".ino"
+    if "setup" not in func_defs:
+        func_defs["setup"] = ["void setup() {}", ""]
+    if "loop" not in func_defs:
+        if auto_loop:
+            loop_body = [f"{name}();" for name in func_defs if name not in ("setup", "loop")]
+            func_defs["loop"] = ["void loop() {"] + loop_body + ["}", ""]
+        else:
+            func_defs["loop"] = ["void loop() {}", ""]
+
+    out_file = os.path.splitext(py_file)[0] + ".ino"
     with open(out_file, "w") as f:
-        # Headers first
         for h in headers:
             f.write(f'#include "{h}"\n')
         f.write("\n")
-        # Defines
-        for d in defines:
-            f.write(d + "\n")
+        for stmt in other_stmts:
+            f.write(stmt + "\n")
         f.write("\n")
-        # Rest of code
-        f.write("\n".join(lines))
+        for func in func_defs.values():
+            for line in func:
+                f.write(line + "\n")
+    console.print(Panel(f"[bold green]✅ Transpiled {py_file} → {out_file}[/bold green]\nHeaders: {headers}"))
+    return out_file
 
-    print(f"✅ Transpiled {py_file} → {out_file} with headers {headers} and #defines")
-    
+def list_ports():
+    try:
+        result = subprocess.run(["arduino-cli", "board", "list"], capture_output=True, text=True)
+        console.print("[bold cyan]Connected Arduino boards:[/bold cyan]")
+        console.print(result.stdout)
+    except FileNotFoundError:
+        console.print("[red]❌ arduino-cli not found. Install it first.[/red]")
+
+# -------------------- Upload with Logs --------------------
+def log_upload(sketch_dir, content):
+    log_dir = os.path.join(sketch_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"upload_{timestamp}.log")
+    with open(log_file, "w") as f:
+        f.write(content)
+    return log_file
+
+def upload(py_file, auto_loop=False, port=None, fqbn="arduino:avr:uno"):
+    ino_file = to_ino(py_file, auto_loop=auto_loop)
+    ino_name = os.path.splitext(os.path.basename(ino_file))[0]
+    sketch_dir = os.path.join(os.path.dirname(ino_file), ino_name)
+    if os.path.exists(sketch_dir):
+        shutil.rmtree(sketch_dir)
+    os.makedirs(sketch_dir)
+    target_ino = os.path.join(sketch_dir, f"{ino_name}.ino")
+    shutil.move(ino_file, target_ino)
+
+    if not port:
+        try:
+            result = subprocess.run(["arduino-cli", "board", "list"], capture_output=True, text=True)
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 1 and "COM" in parts[0]:
+                    port = parts[0]
+                    break
+            if not port:
+                console.print("[red]❌ Could not auto-detect Arduino port. Please specify with --port[/red]")
+                return
+            console.print(f"[cyan]Auto-detected port:[/cyan] {port}")
+        except FileNotFoundError:
+            console.print("[red]❌ arduino-cli not found. Install it first.[/red]")
+            return
+
+    try:
+        console.print(f"[yellow]Compiling {target_ino}...[/yellow]")
+        compile_result = subprocess.run(["arduino-cli", "compile", "--fqbn", fqbn, sketch_dir],
+                                        capture_output=True, text=True)
+        console.print(compile_result.stdout)
+        log_file = log_upload(sketch_dir, compile_result.stdout + compile_result.stderr)
+
+        console.print(f"[yellow]Uploading {target_ino} to {port}...[/yellow]")
+        upload_result = subprocess.run(["arduino-cli", "upload", "-p", port, "--fqbn", fqbn, sketch_dir],
+                                       capture_output=True, text=True)
+        console.print(upload_result.stdout)
+        log_upload(sketch_dir, upload_result.stdout + upload_result.stderr)
+
+        if compile_result.returncode == 0 and upload_result.returncode == 0:
+            console.print(f"[green]✅ Upload successful! Logs saved in {sketch_dir}/logs[/green]")
+        else:
+            console.print(f"[red]❌ Upload failed! Check logs in {sketch_dir}/logs[/red]")
+
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]❌ Error during upload: {e}[/red]")
+
 # -------------------- CLI --------------------
 def main():
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command")
+    sp = parser.add_subparsers(dest="command")
 
-    parser_header = subparsers.add_parser("convert-header")
-    parser_header.add_argument("header", help=".h Arduino header to convert")
-    parser_header.add_argument("--libclang", help="Path to libclang.so")
+    header_parser = sp.add_parser("convert-header")
+    header_parser.add_argument("header")
+    header_parser.add_argument("--libclang")
 
-    parser_ino = subparsers.add_parser("to-ino")
-    parser_ino.add_argument("pyfile", help="Python sketch")
+    ino_parser = sp.add_parser("to-ino")
+    ino_parser.add_argument("pyfile")
+    ino_parser.add_argument("--auto-loop", action="store_true")
+
+    upload_parser = sp.add_parser("upload")
+    upload_parser.add_argument("pyfile")
+    upload_parser.add_argument("--auto-loop", action="store_true")
+    upload_parser.add_argument("--port")
+    upload_parser.add_argument("--list-ports", action="store_true")
+    upload_parser.add_argument("--fqbn", default="arduino:avr:uno")
 
     args = parser.parse_args()
-
     if args.command == "convert-header":
         if args.libclang:
             Config.set_library_file(args.libclang)
         convert_header(args.header)
     elif args.command == "to-ino":
-        to_ino(args.pyfile)
+        to_ino(args.pyfile, auto_loop=args.auto_loop)
+    elif args.command == "upload":
+        if getattr(args, "list_ports", False):
+            list_ports()
+        else:
+            upload(args.pyfile, auto_loop=args.auto_loop, port=args.port, fqbn=args.fqbn)
     else:
         parser.print_help()
 
