@@ -18,13 +18,11 @@ PyDuino is a Python-to-Arduino transpiler and uploader. Write Arduino sketches i
 
 ## 🛠️ Setup Guide
 
-1. Clone or download PyDuino repo.
-2. Ensure Python 3.13+ is installed.
-3. Install dependencies:
-
-   ```bash
-   pip install clang rich
-   ```
+1. Clone or download the PyDuino repo.
+2. Ensure that Python 3.11+ is installed.
+3. Run `build.bat`.
+4. Enjoy!
+5. Examples at: https://github.com/pro-grammer-SD/pyduino_seperate_tests/
 
 ---
 
