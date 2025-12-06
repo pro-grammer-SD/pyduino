@@ -16,3 +16,6 @@ for %%f in (dist\*.whl) do python -m pip install "%%f"
 
 REM Run CLI
 python -m pyduino %*
+
+REM Clean __pycache__
+rmdir /s /q pyduino\__pycache__

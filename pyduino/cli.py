@@ -5,7 +5,6 @@ from rich.panel import Panel
 
 console = Console()
 
-# -------------------- Helpers --------------------
 def cpp_type_to_py(cpp_type):
     if cpp_type in ["int", "long", "short", "unsigned int", "uint8_t"]:
         return "int"
@@ -18,11 +17,9 @@ def cpp_type_to_py(cpp_type):
     else:
         return "Any"
 
-# -------------------- Header -> Python --------------------
 def parse_header(header_file):
     index = Index.create()
-    tu = index.parse(header_file, args=['-x', 'c++', '-std=c++11'])
-    return tu
+    return index.parse(header_file, args=['-x', 'c++', '-std=c++11'])
 
 def extract_classes(tu):
     classes = []
@@ -61,19 +58,18 @@ def generate_python_stub(classes, out_file):
             if not cls['methods']:
                 f.write("    pass\n")
             f.write("\n")
-    console.print(f"[green]✅ Python stub written to {out_file}[/green]")
+    console.print(f"[green]Python stub → {out_file}[/green]")
 
 def convert_header(header_file):
-    py_file = os.path.splitext(os.path.basename(header_file))[0] + ".py"
+    out_dir = "lib"
+    os.makedirs(out_dir, exist_ok=True)
+    py_file = os.path.join(out_dir, os.path.splitext(os.path.basename(header_file))[0] + ".py")
     tu = parse_header(header_file)
     classes = extract_classes(tu)
     generate_python_stub(classes, py_file)
 
-# -------------------- Python -> .ino --------------------
-BIN_OPS = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*', ast.Div: '/',
-           ast.FloorDiv: '/', ast.Mod: '%', ast.Pow: '**'}
-CMP_OPS = {ast.Eq: '==', ast.NotEq: '!=', ast.Lt: '<', ast.LtE: '<=',
-           ast.Gt: '>', ast.GtE: '>='}
+BIN_OPS = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*', ast.Div: '/', ast.FloorDiv: '/', ast.Mod: '%', ast.Pow: '**'}
+CMP_OPS = {ast.Eq: '==', ast.NotEq: '!=', ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>='}
 BOOL_OPS = {ast.And: '&&', ast.Or: '||'}
 UNARY_OPS = {ast.Not: '!'}
 
@@ -85,16 +81,12 @@ def py_expr_to_cpp(node):
     elif isinstance(node, ast.BoolOp):
         return "(" + f" {BOOL_OPS[type(node.op)]} ".join(py_expr_to_cpp(v) for v in node.values) + ")"
     elif isinstance(node, ast.Compare):
-        left = py_expr_to_cpp(node.left)
-        op = CMP_OPS[type(node.ops[0])]
-        comp = py_expr_to_cpp(node.comparators[0])
-        return f"({left} {op} {comp})"
+        return f"({py_expr_to_cpp(node.left)} {CMP_OPS[type(node.ops[0])]} {py_expr_to_cpp(node.comparators[0])})"
     elif isinstance(node, ast.Call):
         func = node.func
         args = ", ".join(py_expr_to_cpp(a) for a in node.args)
         if isinstance(func, ast.Attribute):
-            val = func.value.id if isinstance(func.value, ast.Name) else "obj"
-            return f"{val}.{func.attr}({args})"
+            return f"{func.value.id}.{func.attr}({args})"
         elif isinstance(func, ast.Name):
             return f"{func.id}({args})"
     elif isinstance(node, ast.Name):
@@ -111,8 +103,6 @@ def py_stmt_to_cpp(node, indent=0, global_scope=True):
             cls_name = node.value.func.id
             args = ", ".join(py_expr_to_cpp(a) for a in node.value.args)
             lines.append(f"{cls_name} {node.targets[0].id}({args});")
-        elif isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float)):
-            lines.append(f"#define {node.targets[0].id} {node.value.value}")
         else:
             lines.append(f"{ind}{node.targets[0].id} = {py_expr_to_cpp(node.value)};")
     elif isinstance(node, ast.AugAssign):
@@ -148,21 +138,18 @@ def py_stmt_to_cpp(node, indent=0, global_scope=True):
         for n in node.body:
             lines.extend(py_stmt_to_cpp(n, indent+1, False))
         lines.append(f"{ind}}}")
-    elif isinstance(node, (ast.Break, ast.Continue)):
-        lines.append(f"{ind}{type(node).__name__.lower()};")
     return lines
 
 def detect_headers(py_file):
     headers = set()
     with open(py_file) as f:
         for line in f:
-            m = re.match(r'from (\w+) import', line)
+            m = re.match(r'from lib\.(\w+) import', line)
             if m:
-                name = m.group(1)
-                headers.add(f"{name}.h")
+                headers.add(m.group(1) + ".h")
     return list(headers)
 
-def to_ino(py_file, auto_loop=False):
+def to_ino(py_file, auto_loop=False, for_upload=False):
     headers = detect_headers(py_file)
     with open(py_file) as f:
         tree = ast.parse(f.read())
@@ -177,8 +164,7 @@ def to_ino(py_file, auto_loop=False):
         func_defs["setup"] = ["void setup() {}", ""]
     if "loop" not in func_defs:
         if auto_loop:
-            loop_body = [f"{name}();" for name in func_defs if name not in ("setup", "loop")]
-            func_defs["loop"] = ["void loop() {"] + loop_body + ["}", ""]
+            func_defs["loop"] = ["void loop() {"] + [f"{n}();" for n in func_defs if n not in ("setup","loop")] + ["}", ""]
         else:
             func_defs["loop"] = ["void loop() {}", ""]
     out_file = os.path.splitext(py_file)[0] + ".ino"
@@ -192,141 +178,96 @@ def to_ino(py_file, auto_loop=False):
         for func in func_defs.values():
             for line in func:
                 f.write(line + "\n")
-    console.print(Panel(f"[bold green]✅ Transpiled {py_file} → {out_file}[/bold green]\nHeaders: {headers}"))
-    return out_file
+    console.print(Panel(f"Transpiled {py_file} → {out_file}\nHeaders: {headers}"))
+    return out_file, headers
 
 def list_ports():
-    try:
-        arduino_cli = os.path.join(os.getcwd(), "deps", "arduino-cli.exe")
-        result = subprocess.run([arduino_cli, "board", "list"], capture_output=True, text=True)
-        console.print("[bold cyan]Connected Arduino boards:[/bold cyan]")
-        console.print(result.stdout)
-    except FileNotFoundError:
-        console.print("[red]❌ arduino-cli not found. Install it first.[/red]")
+    cli = os.path.join(os.getcwd(), "deps", "arduino-cli.exe")
+    result = subprocess.run([cli, "board", "list"], capture_output=True, text=True)
+    console.print(result.stdout)
 
-# -------------------- Upload --------------------
+def setup_avr():
+    cli = os.path.join(os.getcwd(), "deps", "arduino-cli.exe")
+    result = subprocess.run([cli, "core", "install", "arduino:avr"], capture_output=True, text=True)
+    console.print(result.stdout)
+
 def log_upload(sketch_dir, content):
     log_dir = os.path.join(sketch_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"upload_{timestamp}.log")
+    log_file = os.path.join(log_dir, datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + ".log")
     with open(log_file, "w") as f:
         f.write(content)
     return log_file
 
 def upload(py_file, auto_loop=False, port=None, fqbn="arduino:avr:uno"):
-    ino_file = to_ino(py_file, auto_loop=auto_loop)
+    ino_file, headers = to_ino(py_file, auto_loop=auto_loop, for_upload=True)
     ino_name = os.path.splitext(os.path.basename(ino_file))[0]
-    sketch_dir = os.path.join(os.path.dirname(ino_file), ino_name)
+    base_dir = os.path.dirname(py_file)
+    sketch_dir = os.path.join(base_dir, ino_name)
     if os.path.exists(sketch_dir):
-        shutil.rmtree(sketch_dir)
-    os.makedirs(sketch_dir)
+        try:
+            shutil.rmtree(sketch_dir)
+        except:
+            pass
+    os.makedirs(sketch_dir, exist_ok=True)
     target_ino = os.path.join(sketch_dir, f"{ino_name}.ino")
     shutil.move(ino_file, target_ino)
-    arduino_cli = os.path.join(os.getcwd(), "deps", "arduino-cli.exe")
+    lib_dir = os.path.join(base_dir, "lib")
+    for h in headers:
+        src_h = os.path.join(lib_dir, h)
+        src_cpp = os.path.join(lib_dir, h.replace(".h", ".cpp"))
+        if os.path.exists(src_h):
+            shutil.copy(src_h, sketch_dir)
+        if os.path.exists(src_cpp):
+            shutil.copy(src_cpp, sketch_dir)
+    cli = os.path.join(os.getcwd(), "deps", "arduino-cli.exe")
     if not port:
-        try:
-            result = subprocess.run([arduino_cli, "board", "list"], capture_output=True, text=True)
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 1 and "COM" in parts[0]:
-                    port = parts[0]
-                    break
-            if not port:
-                console.print("[red]❌ Could not auto-detect Arduino port[/red]")
-                return
-            console.print(f"[cyan]Auto-detected port:[/cyan] {port}")
-        except FileNotFoundError:
-            console.print("[red]❌ arduino-cli not found[/red]")
-            return
-    try:
-        console.print(f"[yellow]Compiling {target_ino}...[/yellow]")
-        compile_result = subprocess.run([arduino_cli, "compile", "--fqbn", fqbn, sketch_dir],
-                                        capture_output=True, text=True)
-        console.print(compile_result.stdout)
-        log_file = log_upload(sketch_dir, compile_result.stdout + compile_result.stderr)
-        console.print(f"[yellow]Uploading {target_ino} to {port}...[/yellow]")
-        upload_result = subprocess.run([arduino_cli, "upload", "-p", port, "--fqbn", fqbn, sketch_dir],
-                                       capture_output=True, text=True)
-        console.print(upload_result.stdout)
-        log_upload(sketch_dir, upload_result.stdout + upload_result.stderr)
-        if compile_result.returncode == 0 and upload_result.returncode == 0:
-            console.print(f"[green]✅ Upload successful! Logs in {sketch_dir}/logs[/green]")
-        else:
-            console.print(f"[red]❌ Upload failed! Check logs in {sketch_dir}/logs[/red]")
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
-
-# -------------------- Create Project --------------------
-def create_project(project_name):
-    project_root = os.path.join(os.getcwd(), project_name)
-    if os.path.exists(project_root):
-        console.print(f"[red]❌ Project {project_name} already exists[/red]")
+        result = subprocess.run([cli, "board", "list"], capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            if "COM" in line:
+                port = line.split()[0]
+                break
+    compile_result = subprocess.run([cli, "compile", "--fqbn", fqbn, "."], cwd=sketch_dir, capture_output=True, text=True)
+    log_upload(sketch_dir, compile_result.stdout + compile_result.stderr)
+    upload_result = subprocess.run([cli, "upload", "-p", port, "--fqbn", fqbn, "."], cwd=sketch_dir, capture_output=True, text=True)
+    log_upload(sketch_dir, upload_result.stdout + upload_result.stderr)
+    if compile_result.returncode==0 and upload_result.returncode==0:
+        console.print("[green]Upload success[/green]")
+    else:
+        console.print("[red]Upload failed[/red]")
+        
+def create_project(name):
+    root = os.path.join(os.getcwd(), name)
+    if os.path.exists(root):
         return
-    os.makedirs(project_root, exist_ok=True)
-    os.makedirs(os.path.join(project_root, "lib"), exist_ok=True)
-    os.makedirs(os.path.join(project_root, "deps"), exist_ok=True)
-    # Copy PyDuino lib/deps
-    src_lib = os.path.join(os.path.dirname(__file__), "lib")
-    src_deps = os.path.join(os.path.dirname(__file__), "deps")
-    for folder, dst in [(src_lib, "lib"), (src_deps, "deps")]:
-        if os.path.exists(folder):
-            for f in os.listdir(folder):
-                shutil.copy(os.path.join(folder, f), os.path.join(project_root, dst, f))
-    # main.py in root
-    main_py = os.path.join(project_root, "main.py")
-    if not os.path.exists(main_py):
-        with open(main_py, "w") as f:
-            f.write(
-"""from lib.CheapStepper import CheapStepper
+    os.makedirs(os.path.join(root, "lib"), exist_ok=True)
+    os.makedirs(os.path.join(root, "deps"), exist_ok=True)
+    with open(os.path.join(root, "main.py"), "w") as f:
+        f.write("from lib.CheapStepper import CheapStepper\n\ndef setup(): pass\n\ndef loop(): pass\n")
 
-def setup():
-    pass
-
-def loop():
-    pass
-"""
-            )
-    console.print(f"[green]✅ Project '{project_name}' created[/green]")
-
-# -------------------- CLI --------------------
 def main():
     parser = argparse.ArgumentParser()
-    sp = parser.add_subparsers(dest="command")
-
-    convert_parser = sp.add_parser("convert-header")
-    convert_parser.add_argument("header")
-    convert_parser.add_argument("--libclang")
-
-    to_ino_parser = sp.add_parser("to-ino")
-    to_ino_parser.add_argument("pyfile")
-    to_ino_parser.add_argument("--auto-loop", action="store_true")
-
-    upload_parser = sp.add_parser("upload")
-    upload_parser.add_argument("pyfile")
-    upload_parser.add_argument("--auto-loop", action="store_true")
-    upload_parser.add_argument("--port")
-    upload_parser.add_argument("--list-ports", action="store_true")
-    upload_parser.add_argument("--fqbn", default="arduino:avr:uno")
-
-    create_parser = sp.add_parser("create")
-    create_parser.add_argument("project_name")
-
+    sp = parser.add_subparsers(dest="cmd")
+    a = sp.add_parser("convert-header"); a.add_argument("header"); a.add_argument("--libclang")
+    b = sp.add_parser("to-ino"); b.add_argument("pyfile"); b.add_argument("--auto-loop", action="store_true")
+    c = sp.add_parser("setupavr")
+    d = sp.add_parser("upload"); d.add_argument("pyfile"); d.add_argument("--auto-loop", action="store_true"); d.add_argument("--port"); d.add_argument("--list-ports", action="store_true"); d.add_argument("--fqbn", default="arduino:avr:uno")
+    e = sp.add_parser("create"); e.add_argument("name")
     args = parser.parse_args()
-
-    if args.command == "convert-header":
-        if args.libclang:
-            Config.set_library_file(args.libclang)
+    if args.cmd=="convert-header":
+        libclang = os.path.join(os.getcwd(),"deps","libclang.dll")
+        if args.libclang: Config.set_library_file(args.libclang)
+        else: Config.set_library_file(libclang)
         convert_header(args.header)
-    elif args.command == "to-ino":
+    elif args.cmd=="to-ino":
         to_ino(args.pyfile, auto_loop=args.auto_loop)
-    elif args.command == "upload":
-        if getattr(args, "list_ports", False):
-            list_ports()
-        else:
-            upload(args.pyfile, auto_loop=args.auto_loop, port=args.port, fqbn=args.fqbn)
-    elif args.command == "create":
-        create_project(args.project_name)
+    elif args.cmd=="setupavr":
+        setup_avr()
+    elif args.cmd=="upload":
+        if args.list_ports: list_ports()
+        else: upload(args.pyfile, auto_loop=args.auto_loop, port=args.port, fqbn=args.fqbn)
+    elif args.cmd=="create":
+        create_project(args.name)
     else:
         parser.print_help()
 
