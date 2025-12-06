@@ -31,7 +31,7 @@ It also auto-detects imported headers, supports `#define` constants from Python 
 ### 1. Convert Arduino header (.h) to Python stub
 
 ```bash
-python arduino_transpile.py convert-header path/to/MyLibrary.h
+python cli.py convert-header path/to/MyLibrary.h
 ```
 
 * Creates `MyLibrary.py` stub with classes and methods.
@@ -40,7 +40,7 @@ python arduino_transpile.py convert-header path/to/MyLibrary.h
 ### 2. Convert Python sketch (.py) to Arduino `.ino`
 
 ```bash
-python arduino_transpile.py to-ino path/to/sketch.py
+python cli.py to-ino path/to/sketch.py
 ```
 
 * Auto-detects headers from Python imports (ignores `Arduino.py`).
@@ -52,7 +52,7 @@ python arduino_transpile.py to-ino path/to/sketch.py
 ### 3. Upload Python sketch to Arduino
 
 ```bash
-python arduino_transpile.py upload path/to/sketch.py --port COM6
+python cli.py upload path/to/sketch.py --port COM6
 ```
 
 * Converts `.py` → `.ino`, creates sketch folder if needed.
