@@ -111,4 +111,8 @@ python main.py upload main.py --port COM3 --fqbn arduino:avr:uno
 
 ---
 
+## 💁‍♂️ Extra Info
+- 🔒 PyDuino currently supports Windows only. It would be great if you could help me to port it to other operating systems.
+- 😄 Also, feel free to help me improve this library, block-by-block! PRs are always welcome and openly supported!
+
 Made with 💜 by @pro-grammer-SD
