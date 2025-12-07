@@ -95,49 +95,56 @@ def py_expr_to_cpp(node):
         return repr(node.value)
     return "0"
 
-def py_stmt_to_cpp(node, indent=0, global_scope=True):
+def py_stmt_to_cpp(node, indent=0, raw_lines=None):
     ind = "    " * indent
     lines = []
     if isinstance(node, ast.Assign):
-        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
-            cls_name = node.value.func.id
-            args = ", ".join(py_expr_to_cpp(a) for a in node.value.args)
-            lines.append(f"{cls_name} {node.targets[0].id}({args});")
-        else:
-            lines.append(f"{ind}{node.targets[0].id} = {py_expr_to_cpp(node.value)};")
+        code = f"{ind}{node.targets[0].id} = {py_expr_to_cpp(node.value)};"
     elif isinstance(node, ast.AugAssign):
-        lines.append(f"{ind}{node.target.id} {BIN_OPS[type(node.op)]}= {py_expr_to_cpp(node.value)};")
+        code = f"{ind}{node.target.id} {BIN_OPS[type(node.op)]}= {py_expr_to_cpp(node.value)};"
     elif isinstance(node, ast.Expr):
-        lines.append(f"{ind}{py_expr_to_cpp(node.value)};")
+        code = f"{ind}{py_expr_to_cpp(node.value)};"
     elif isinstance(node, ast.If):
-        lines.append(f"{ind}if {py_expr_to_cpp(node.test)} {{")
+        code = f"{ind}if {py_expr_to_cpp(node.test)} {{"
+        lines.append((node.lineno, code))
         for n in node.body:
-            lines.extend(py_stmt_to_cpp(n, indent+1, False))
+            lines.extend(py_stmt_to_cpp(n, indent+1, raw_lines))
         if node.orelse:
-            lines.append(f"{ind}}} else {{")
+            lines.append((node.lineno, f"{ind}}} else {{"))
             for n in node.orelse:
-                lines.extend(py_stmt_to_cpp(n, indent+1, False))
-        lines.append(f"{ind}}}")
+                lines.extend(py_stmt_to_cpp(n, indent+1, raw_lines))
+        lines.append((node.lineno, f"{ind}}}"))
+        return lines
     elif isinstance(node, ast.While):
-        lines.append(f"{ind}while {py_expr_to_cpp(node.test)} {{")
+        code = f"{ind}while {py_expr_to_cpp(node.test)} {{"
+        lines.append((node.lineno, code))
         for n in node.body:
-            lines.extend(py_stmt_to_cpp(n, indent+1, False))
-        lines.append(f"{ind}}}")
+            lines.extend(py_stmt_to_cpp(n, indent+1, raw_lines))
+        lines.append((node.lineno, f"{ind}}}"))
+        return lines
     elif isinstance(node, ast.For):
         if isinstance(node.iter, ast.Call) and getattr(node.iter.func, "id", "")=="range":
             args = node.iter.args
             start, end = ("0", py_expr_to_cpp(args[0])) if len(args)==1 else (py_expr_to_cpp(args[0]), py_expr_to_cpp(args[1]))
             var = node.target.id
-            lines.append(f"{ind}for (int {var}={start}; {var}<{end}; {var}++) {{")
+            code = f"{ind}for (int {var}={start}; {var}<{end}; {var}++) {{"
+            lines.append((node.lineno, code))
             for n in node.body:
-                lines.extend(py_stmt_to_cpp(n, indent+1, False))
-            lines.append(f"{ind}}}")
+                lines.extend(py_stmt_to_cpp(n, indent+1, raw_lines))
+            lines.append((node.lineno, f"{ind}}}"))
+            return lines
+        code = ind
     elif isinstance(node, ast.FunctionDef):
         args = ", ".join(f"auto {a.arg}" for a in node.args.args)
-        lines.append(f"{ind}void {node.name}({args}) {{")
+        code = f"{ind}void {node.name}({args}) {{"
+        lines.append((node.lineno, code))
         for n in node.body:
-            lines.extend(py_stmt_to_cpp(n, indent+1, False))
-        lines.append(f"{ind}}}")
+            lines.extend(py_stmt_to_cpp(n, indent+1, raw_lines))
+        lines.append((node.lineno, f"{ind}}}"))
+        return lines
+    else:
+        code = ind
+    lines.append((node.lineno, code))
     return lines
 
 def detect_headers(py_file):
@@ -149,37 +156,47 @@ def detect_headers(py_file):
                 headers.add(m.group(1) + ".h")
     return list(headers)
 
-def to_ino(py_file, auto_loop=False, for_upload=False):
-    headers = detect_headers(py_file)
-    with open(py_file) as f:
-        tree = ast.parse(f.read())
+def to_ino(py_file, auto_loop=False):
+    raw = open(py_file).read().splitlines()
+    tree = ast.parse("\n".join(raw))
     func_defs = {}
-    other_stmts = []
+    body_lines = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            func_defs[node.name] = py_stmt_to_cpp(node)
+            func_defs[node.name] = py_stmt_to_cpp(node, raw_lines=raw)
         elif not isinstance(node, (ast.Import, ast.ImportFrom)):
-            other_stmts.extend(py_stmt_to_cpp(node))
+            body_lines.extend(py_stmt_to_cpp(node, raw_lines=raw))
     if "setup" not in func_defs:
-        func_defs["setup"] = ["void setup() {}", ""]
+        func_defs["setup"] = [(0, "void setup() {}")]
     if "loop" not in func_defs:
         if auto_loop:
-            func_defs["loop"] = ["void loop() {"] + [f"{n}();" for n in func_defs if n not in ("setup","loop")] + ["}", ""]
+            calls = [f"{n}();" for n in func_defs if n not in ("setup","loop")]
+            func_defs["loop"] = [(0, "void loop() {")] + [(0, c) for c in calls] + [(0, "}")] 
         else:
-            func_defs["loop"] = ["void loop() {}", ""]
+            func_defs["loop"] = [(0, "void loop() {}")]
     out_file = os.path.splitext(py_file)[0] + ".ino"
     with open(out_file, "w") as f:
-        for h in headers:
-            f.write(f'#include "{h}"\n')
-        f.write("\n")
-        for stmt in other_stmts:
-            f.write(stmt + "\n")
-        f.write("\n")
-        for func in func_defs.values():
-            for line in func:
-                f.write(line + "\n")
-    console.print(Panel(f"Transpiled {py_file} → {out_file}\nHeaders: {headers}"))
-    return out_file, headers
+        for lineno, code in body_lines:
+            if 1 <= lineno <= len(raw) and "#" in raw[lineno-1]:
+                c = raw[lineno-1].split("#",1)[1].strip()
+                if code.strip():
+                    f.write(code + " //" + c + "\n")
+                else:
+                    f.write("// " + c + "\n")
+            else:
+                f.write(code + "\n")
+        for name, block in func_defs.items():
+            for lineno, code in block:
+                if 1 <= lineno <= len(raw) and "#" in raw[lineno-1]:
+                    c = raw[lineno-1].split("#",1)[1].strip()
+                    if code.strip():
+                        f.write(code + " //" + c + "\n")
+                    else:
+                        f.write("// " + c + "\n")
+                else:
+                    f.write(code + "\n")
+    console.print(Panel(f"Transpiled {py_file} → {out_file}"))
+    return out_file, detect_headers(py_file)
 
 def list_ports():
     cli = os.path.join(os.getcwd(), "deps", "arduino-cli.exe")
@@ -200,7 +217,7 @@ def log_upload(sketch_dir, content):
     return log_file
 
 def upload(py_file, auto_loop=False, port=None, fqbn="arduino:avr:uno"):
-    ino_file, headers = to_ino(py_file, auto_loop=auto_loop, for_upload=True)
+    ino_file, headers = to_ino(py_file, auto_loop=auto_loop)
     ino_name = os.path.splitext(os.path.basename(ino_file))[0]
     base_dir = os.path.dirname(py_file)
     sketch_dir = os.path.join(base_dir, ino_name)

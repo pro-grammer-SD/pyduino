@@ -13,6 +13,7 @@ PyDuino is a Python-to-Arduino transpiler and uploader. Write Arduino sketches i
 * Detect Arduino headers in Python files 🔍
 * List available COM ports 📡
 * Support for multiple function overloads and basic Python-to-C++ expressions ✨
+* Your comments are retained! 🗣️
 
 ---
 
