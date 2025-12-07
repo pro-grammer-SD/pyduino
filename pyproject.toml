@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyduino"
-version = "0.0.2"
+version = "0.0.3"
 description = "Python transpiler and uploader for Arduino sketches (For Windows only)"
 authors = [{name="Soumalya Das"}]
 readme = "README.md"
